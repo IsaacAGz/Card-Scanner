@@ -8,14 +8,12 @@ PIP = $(VENV)/Scripts/pip
 
 .PHONY: venv install build run stop clean
 
-# 1. Setup Local Environment
 venv:
 	python -m venv $(VENV)
 
 install:
 	pip install -r requirements.txt
 
-# 2. Docker Operations
 build:
 	docker build --no-cache -t mtg-scanner-app .
 
@@ -30,10 +28,8 @@ stop:
 logs:
 	docker logs -f $(CONTAINER_NAME)
 
-# 3. Cleanup
 clean: stop
 	rm -rf $(VENV)
 	@echo "Cleaned up venv and stopped container."
 
-# Rebuild and restart quickly
 restart: stop build run
