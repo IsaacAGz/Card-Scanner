@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, File
+import imutils
 from transformers import AutoImageProcessor, AutoModel
 from inference_sdk import InferenceHTTPClient
 from contextlib import asynccontextmanager
@@ -9,13 +10,6 @@ import cv2
 import numpy as np
 import uvicorn
 import sqlite3
-
-
-
-CLIENT = InferenceHTTPClient(
-    api_url="https://detect.roboflow.com",
-    api_key="XCnO8a9HYvPhkX9nmxge"
-)
 
 model = None
 processor = None
@@ -46,6 +40,19 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+def order_points(points):
+    rectangle = np.zeros((4,2), dtype = "float32")
+    sum = points.sum(axis = 1)
+    rectangle[0] = points[np.argmin(sum)]
+    rectangle[2] = points[np.argmax(sum)]
+
+    diff = np.diff(points, axis = 1)
+    
+    rectangle[1] = points[np.argmin(diff)]
+    rectangle[3] = points[np.argmax(diff)]
+
+    return rectangle
+
 def get_card_info(faiss_id):
     if faiss_id < 0:
         return None
@@ -66,39 +73,52 @@ def get_embedding(image_np):
     return outputs.last_hidden_state[:,0,:].cpu().numpy()
 
 def process_image(frame):
-    result = CLIENT.infer(frame, model_id="mtg-card-detection-slnj6/2")
-
     found_cards_info = []
 
-    for prediction in result.get("predictions", []):
-        x = prediction['x']
-        y = prediction['y']
-        w = prediction['width']
-        h = prediction['height']
+    grayscale_image = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blurred_image = cv2.GaussianBlur(grayscale_image, (5,5), 0)
+    edged_image = cv2.Canny(blurred_image, 75, 200)
 
-        x1 = int(x - w/2)
-        y1 = int(y - h/2)
-        x2 = int(x + w/2)
-        y2 = int(y + h/2)
+    contours = cv2.findContours(edged_image.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = imutils.grab_contours(contours)
+    contours = sorted(contours, key = cv2.contourArea, reverse = True)[:5]
 
-        card_crop = frame[max(0, y1):y2, max(0, x1):x2]
-        
-        if card_crop.size == 0: continue
+    #cv2.drawContours(frame, contours, -1, (0,255,0), 2)
 
-        vector = get_embedding(card_crop) 
+    for contour in contours:
+        perimeter = cv2.arcLength(contour, True)
+        approximation = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
 
-        query_vector = vector.reshape(1, -1).astype('float32')
-        distances, indices = index.search(query_vector, k=1)
+        if len(approximation) == 4:
+            points = approximation.reshape(4,2)
+            rectangle = order_points(points)
+            destination_points = np.array([[0,0], [420,0], [420,300], [0,300]], dtype = "float32")
+            perspective_transform = cv2.getPerspectiveTransform(rectangle, destination_points)
+            warped = cv2.warpPerspective(frame, perspective_transform, (420, 300))
 
-        card_idx = indices[0][0]
-        card_info = get_card_info(card_idx)
-        found_cards_info.append({
-            "name": card_info[0] if card_info else "Unknown",
-            "set": card_info[1] if card_info else "Unknown",
-            "dist": float(distances[0][0]),
-            "box": [x1, y1, x2, y2]
-        })
-    return {"count": len(found_cards_info), "cards": found_cards_info}
+            embedding = get_embedding(warped)
+            embedding = np.array(embedding, dtype = np.float32)
+
+            if len(embedding.shape) == 1:
+                embedding = np.expand_dims(embedding, axis = 0)
+            
+            distances, indices = index.search(embedding, 1)
+
+            faiss_id = indices[0][0]
+
+            card_info = get_card_info(faiss_id)
+
+            if card_info:
+                found_cards_info.append({
+                    "name": card_info[0],
+                    "set_code": card_info[1],
+                    "distance": float(distances[0][0]),
+                    "box": rectangle.astype(int).tolist()
+                })
+            
+        return found_cards_info
+
+
 
 
 @app.post("/scan")
@@ -106,10 +126,11 @@ async def scan_cards(file: UploadFile = File(...)):
     contents = await file.read()
     nparr = np.frombuffer(contents, np.uint8)
     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    frame = imutils.resize(frame, width = 600)
 
     results = process_image(frame)
 
-    return results
+    return {"status": "success", "data": results}
 
 @app.post("/scan_multiple")
 async def scan_multiple(file: UploadFile = File(...)):
