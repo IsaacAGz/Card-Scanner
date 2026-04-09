@@ -1,3 +1,7 @@
+ifeq ($(OS),Windows_NT)
+    SHELL := cmd.exe
+endif
+
 # Variables
 IMAGE_NAME = mtg-scanner-app
 CONTAINER_NAME = mtg-service
@@ -29,13 +33,12 @@ run:
 stop:
 	docker stop $(CONTAINER_NAME) || true
 	docker rm $(CONTAINER_NAME) || true
-	if exist $(VENV) rd /s /q $(VENV)
 
 logs:
 	docker logs -f $(CONTAINER_NAME)
 
 clean: stop
-	rm -rf $(VENV) rd /s /q $(VENV)
+	if exist $(VENV) rd /s /q $(VENV)
 	@echo "Cleaned up venv and stopped container."
 
 restart: stop build run
