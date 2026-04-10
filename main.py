@@ -116,10 +116,7 @@ def process_image(frame):
                     "box": rectangle.astype(int).tolist()
                 })
             
-        return found_cards_info
-
-
-
+    return found_cards_info
 
 @app.post("/scan")
 async def scan_cards(file: UploadFile = File(...)):
