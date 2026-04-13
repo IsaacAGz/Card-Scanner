@@ -92,7 +92,7 @@ def process_image(frame):
         if len(approximation) == 4:
             points = approximation.reshape(4,2)
             rectangle = order_points(points)
-            destination_points = np.array([[0,0], [420,0], [420,300], [0,300]], dtype = "float32")
+            destination_points = np.array([[0,0], [300,0], [300,420], [0,420]], dtype = "float32")
             perspective_transform = cv2.getPerspectiveTransform(rectangle, destination_points)
             warped = cv2.warpPerspective(frame, perspective_transform, (300, 420))
 
