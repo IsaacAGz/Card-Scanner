@@ -94,7 +94,7 @@ def process_image(frame):
             rectangle = order_points(points)
             destination_points = np.array([[0,0], [420,0], [420,300], [0,300]], dtype = "float32")
             perspective_transform = cv2.getPerspectiveTransform(rectangle, destination_points)
-            warped = cv2.warpPerspective(frame, perspective_transform, (420, 300))
+            warped = cv2.warpPerspective(frame, perspective_transform, (300, 420))
 
             embedding = get_embedding(warped)
             embedding = np.array(embedding, dtype = np.float32)
@@ -116,10 +116,7 @@ def process_image(frame):
                     "box": rectangle.astype(int).tolist()
                 })
             
-        return found_cards_info
-
-
-
+    return found_cards_info
 
 @app.post("/scan")
 async def scan_cards(file: UploadFile = File(...)):
@@ -131,10 +128,6 @@ async def scan_cards(file: UploadFile = File(...)):
     results = process_image(frame)
 
     return {"status": "success", "data": results}
-
-@app.post("/scan_multiple")
-async def scan_multiple(file: UploadFile = File(...)):
-    pass
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

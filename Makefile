@@ -1,7 +1,3 @@
-ifeq ($(OS),Windows_NT)
-    SHELL := cmd.exe
-endif
-
 # Variables
 IMAGE_NAME = mtg-scanner-app
 CONTAINER_NAME = mtg-service
