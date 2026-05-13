@@ -10,3 +10,5 @@ faiss-cpu
 inference-sdk
 roboflow
 imutils
+PyQt6
+setuptools
