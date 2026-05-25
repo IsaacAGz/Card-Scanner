@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File
 from transformers import AutoImageProcessor, AutoModel
-from inference_sdk import InferenceHTTPClient
 from contextlib import asynccontextmanager
+from ultralytics import YOLO
 import torch
 import os
 import faiss
@@ -10,13 +10,7 @@ import numpy as np
 import uvicorn
 import sqlite3
 
-
-
-CLIENT = InferenceHTTPClient(
-    api_url="https://detect.roboflow.com",
-    api_key="XCnO8a9HYvPhkX9nmxge"
-)
-
+yolo = None
 model = None
 processor = None
 index = None
@@ -28,6 +22,8 @@ async def lifespan(app: FastAPI):
 
     print("Loading model and processor...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    yolo = YOLO("yolo11s.pt")
 
     model = AutoModel.from_pretrained("facebook/dinov2-base").to(device)
     processor = AutoImageProcessor.from_pretrained("facebook/dinov2-base")
@@ -66,22 +62,24 @@ def get_embedding(image_np):
     return outputs.last_hidden_state[:,0,:].cpu().numpy()
 
 def process_image(frame):
-    result = CLIENT.infer(frame, model_id="mtg-card-detection-slnj6/2")
+    results = yolo(frame, save=True, conf=.75)
 
     found_cards_info = []
 
-    for prediction in result.get("predictions", []):
-        x = prediction['x']
-        y = prediction['y']
-        w = prediction['width']
-        h = prediction['height']
+    height, width, _ = frame.shape
 
-        x1 = int(x - w/2)
-        y1 = int(y - h/2)
-        x2 = int(x + w/2)
-        y2 = int(y + h/2)
+    for prediction in results[0].boxes:
 
-        card_crop = frame[max(0, y1):y2, max(0, x1):x2]
+        #Crop predicted card to get faiss index from embedding model
+
+        xyxy = prediction.xyxy[0].tolist()
+        
+        xmin = max(0, int(xyxy[0]))
+        ymin = max(0, int(xyxy[1]))
+        xmax = min(width, int(xyxy[2]))
+        ymax = min(height, int(xyxy[3]))
+
+        card_crop = frame[ymin:ymax, xmin:xmax]
         
         if card_crop.size == 0: continue
 
@@ -96,7 +94,7 @@ def process_image(frame):
             "name": card_info[0] if card_info else "Unknown",
             "set": card_info[1] if card_info else "Unknown",
             "dist": float(distances[0][0]),
-            "box": [x1, y1, x2, y2]
+            "box": [xmin, ymin, xmax, ymax]
         })
     return {"count": len(found_cards_info), "cards": found_cards_info}
 
@@ -107,13 +105,15 @@ async def scan_cards(file: UploadFile = File(...)):
     nparr = np.frombuffer(contents, np.uint8)
     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
+    # Show window for testing
+    cv2.imshow("Frame", frame)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
     results = process_image(frame)
 
     return results
 
-@app.post("/scan_multiple")
-async def scan_multiple(file: UploadFile = File(...)):
-    pass
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
