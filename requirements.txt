@@ -11,3 +11,4 @@ imutils
 PyQt6
 setuptools
 ultralytics
+python-dotenv
