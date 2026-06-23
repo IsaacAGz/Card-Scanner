@@ -18,9 +18,6 @@ pre_processor = AutoImageProcessor.from_pretrained("../onnx_dinov2")
 
 dimension = 768
 
-# Create index and initialize database
-index = faiss.IndexFlatL2(dimension)
-
 db_conn = sqlite3.connect('mtg_cards.db')
 cursor = db_conn.cursor()
 cursor.execute("""
@@ -31,6 +28,21 @@ cursor.execute("""
         set_code TEXT
     )
 """)
+
+if os.path.exists("mtg_cards.index"):
+    print("Loading existing FAISS index to resume...")
+    index = faiss.read_index("mtg_cards.index")
+    faiss_id_counter = index.ntotal
+    print(f"Resuming with {faiss_id_counter} vectors already indexed.")
+else:
+    print("No existing FAISS index found. Starting fresh.")
+    index = faiss.IndexFlatL2(dimension)
+    faiss_id_counter = 0
+
+cursor.execute("SELECT scryfall_id FROM cards")
+
+processed_ids = set(row[0] for row in cursor.fetchall())
+print(f"Found {len(processed_ids)} cards already recorder in SQLite database.")
 
 def get_embedding_onnx(image_np):
     '''Generates an vector embedding matrix using local ONNX architecture runtime.
@@ -61,11 +73,14 @@ with open(json_file, 'r', encoding='utf-8') as file:
 
 print(f"Total entries lodade: {len(card_data_list)}. Beginning Vector Compilation...")
 
-faiss_id_counter = 0
-
 # Iterate throuh all cards in reference_cards folder
 for i, card in enumerate(card_data_list):
     if card.get('digital') is True:
+        continue
+
+    scryfall_id = card.get('id')
+
+    if scryfall_id in processed_ids:
         continue
 
     image_uris = card.get('image_uris')
@@ -107,7 +122,7 @@ for i, card in enumerate(card_data_list):
 
         faiss_id_counter += 1
 
-        if faiss_id_counter % 500 == 0:
+        if faiss_id_counter % 200 == 0:
             db_conn.commit()
 
             faiss.write_index(index, "mtg_cards.index")
