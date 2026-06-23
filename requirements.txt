@@ -12,3 +12,5 @@ PyQt6
 setuptools
 ultralytics
 python-dotenv
+optimum[onnxruntime]
+onnxruntime

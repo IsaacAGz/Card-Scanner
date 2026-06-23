@@ -1,8 +1,9 @@
 from fastapi import FastAPI, UploadFile, File, status, HTTPException, Header, Security
-from transformers import AutoImageProcessor, AutoModel
+from transformers import AutoImageProcessor
 from contextlib import asynccontextmanager
 from ultralytics import YOLO
 from dotenv import load_dotenv
+import onnxruntime as ort
 import requests
 import time
 import urllib.request
@@ -14,29 +15,27 @@ import numpy as np
 import uvicorn
 import sqlite3
 
-yolo = None
-model = None
+ort_session = None
 processor = None
+yolo = None
 index = None
 db_conn = None
 
 load_dotenv()
-
 API_KEY = os.getenv("ADMIN_KEY")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global yolo, model, processor, index, db_conn
+    global ort_session, processor, index, db_conn, yolo
 
-    print("Loading model and processor...")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Load YOLO model for card object detection
+    # Load YOLO model for card object detection, using default model for now
+    print("Loading YOLO detection weights...")
     yolo = YOLO("yolo11s.pt")
 
-    # embedding model and image processor for vector embeddings
-    model = AutoModel.from_pretrained("facebook/dinov2-base").to(device)
-    processor = AutoImageProcessor.from_pretrained("facebook/dinov2-base")
+    print("Loading optimized ONNX models...")
+    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+    ort_session = ort.InferenceSession("onnx_dinov2/model.onnx", providers=providers)
+    processor = AutoImageProcessor.from_pretrained("onnx_dinov2")
 
     # FAISS Index initializer
     if os.path.exists("mtg_cards.index"):
@@ -55,7 +54,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-def get_card_info(faiss_id):
+def get_card_info(faiss_id: int):
     ''' Uses faiss id in database to pull card attributes.
 
     Args: 
@@ -77,17 +76,23 @@ def get_card_info(faiss_id):
     
     return cursor.fetchone()
     
-def get_embedding(image_np):
-    '''
+def get_embedding(crop_list) -> np.ndarray:
+    '''Generates a batch of DINOv2 embeddings using highly optimized ONNX Runtime execution.
 
     '''
-    rgb_image = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
-    inputs = processor(images=rgb_image, return_tensors="pt").to(model.device)
-    with torch.no_grad():
-        outputs = model(**inputs)
-    return outputs.last_hidden_state[:,0,:].cpu().numpy()
 
-def sync_new_cards(set_code: str, faiss_index, sqlite_conn, model, processor):
+    inputs = processor(images=crop_list, return_tensors="np")
+
+    pixel_values = inputs["pixel_values"].astype(np.float32)
+
+    ort_inputs = {"pixel_values": pixel_values}
+    ort_outputs = ort_session.run(None, ort_inputs)
+        
+    embeddings = ort_outputs[0][:, 0, :].astype('float32')
+
+    return embeddings
+
+def sync_new_cards(set_code: str, faiss_index, sqlite_conn):
     '''
 
     '''
@@ -95,6 +100,9 @@ def sync_new_cards(set_code: str, faiss_index, sqlite_conn, model, processor):
     print(f"Found {len(new_cards)} new cards to index.")
 
     cursor = sqlite_conn.cursor()
+
+    valid_cards_metadata = []
+    crop_list = []
 
     for card in new_cards:
         cursor.execute("SELECT 1 FROM cards WHERE name = ? AND set_code = ?", (card['name'], card['set_code']))
@@ -107,27 +115,40 @@ def sync_new_cards(set_code: str, faiss_index, sqlite_conn, model, processor):
             img_array = np.array(bytearray(resp.read()), dtype=np.uint8)
             card_img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
 
-            rgb_image = cv2.cvtColot(card_img, cv2.COLOR_BGR2RGB)
-            inputs = processor(images=rgb_image, return_tensors="pt").to(model.device)
+            if card_img is None:
+                continue
 
-            with torch.no_grad():
-                outputs = model(**inputs)
+            rgb_image = cv2.cvtColor(card_img, cv2.COLOR_BGR2RGB)
+            crop_list.append(rgb_image)
 
-            vector = outputs.last_hidden_state[:, 0, :].cpu().numpy().astype('float32')
-
-            next_faiss_id = faiss_index.ntotal
-            faiss_index.add(vector.reshape(1, -1))
-
-            cursor.execute("""
-                INSERT INTO cards(faiss_id, name, set_code)
-                VALUES (?, ?, ?)
-                """, (next_faiss_id, card['name'], card['set_code']))
+            valid_cards_metadata.append(card)
             
-            print(f"Succesfully indexed {card['name']} [{card['set_code'].upper()}]")
-
         except Exception as e:
             print(f"Failed to process card{card['name']}: {e}")
             continue
+    
+    if not crop_list:
+        print("No new unique cards to index.")
+        return
+
+    print(f"Generating embeddings for a batch of {len(crop_list)} cards...")
+    
+    all_vectors = get_embedding(crop_list)
+
+    start_faiss_id = faiss_index.ntotal
+    faiss_index.add(all_vectors)
+
+    for i, card in enumerate(crop_list):
+        assigned_faiss_id = start_faiss_id + i
+
+        cursor.execute("""
+            INSERT INTO cards (faiss_id, scryfall_id, name, set_code)
+            VALUES (?, ?, ?)
+            """, (assigned_faiss_id, card['id'], card['name'], card['set_code']))
+    
+    sqlite_conn.commit()
+    print(f"Succesfully batch-indexed {len(valid_cards_metadata)} cards into database and FAISS.")
+
                 
 
 def process_image(frame):
@@ -142,7 +163,8 @@ def process_image(frame):
     results = yolo(frame, save=True, conf=.75)
 
     found_cards_info = []
-    last_seen_cards = {}
+    found_boxes = []
+    crop_list = []
 
     height, width, _ = frame.shape
 
@@ -158,48 +180,39 @@ def process_image(frame):
         ymax = min(height, int(xyxy[3]))
 
         card_crop = frame[ymin:ymax, xmin:xmax]
-        
         if card_crop.size == 0: continue
 
-        # Cachin for recently scanned cards
-        gray_crop = cv2.cvtColor(card_crop, cv2.COLOR_BGR2GRAY)
-        small_crop = cv2.resize((gray_crop), (8,8))
-        card_hash = hash(small_crop.tobytes())
+        rgb_crop = cv2.cvtColor(card_crop, cv2.COLOR_BGR2RGB)
+        crop_list.append(rgb_crop)
+        found_boxes.append([xmin, ymin, xmax, ymax])
 
-        if card_hash in last_seen_cards:
-            found_cards_info.append(last_seen_cards[card_hash])
-            continue
+    if not crop_list:
+        return {"count": 0, "cards": []}
 
-        # FAISS ID embedding vector
-        vector = get_embedding(card_crop) 
+    # FAISS ID embedding vector
+    all_vectors = get_embedding(crop_list) 
 
-        # Lookup card by searching vector space
-        query_vector = vector.reshape(1, -1).astype('float32')
-        distances, indices = index.search(query_vector, k=1)
+    all_distances, all_indices = index.search(all_vectors, k=1)
+
+    # Lookup cards by searching vector space for all cards(vectors found)
+    for i, box in enumerate(found_boxes):
+        dist_val = float(all_distances[i][0])
 
         # Card distance threshold
-        if distances[0][0] > 800:
+        if dist_val > 300:
             continue
 
-        card_idx = indices[0][0]
+        card_idx = all_indices[i][0]
+
         card_info = get_card_info(card_idx)
 
         # Append found card and card attributes if database card close enough to cropped embedded card
         found_cards_info.append({
             "name": card_info[0] if card_info else "Unknown",
             "set": card_info[1] if card_info else "Unknown",
-            "dist": float(distances[0][0]),
-            "box": [xmin, ymin, xmax, ymax]
+            "dist": dist_val,
+            "box": box
         })
-
-        # Get card info for cashing
-        card_data = {
-            "name": card_info[0],
-            "set": card_info[1],
-            "box": [xmin, ymin, xmax, ymax]
-        }
-        
-        last_seen_cards[card_hash] = card_data
 
     return {"count": len(found_cards_info), "cards": found_cards_info}
 
@@ -214,18 +227,21 @@ def fetch_new_cards(set_code: str):
     Returns:
         cards_to_index: list of dictionaries containing the card data for all cards in the set.
     '''
-    url = "https://api.scryfall.com/cards/search?q=set:{set_code.lower()}+is:unique"
+    url = f"https://api.scryfall.com/cards/search?q=set:{set_code.lower()}+is:unique"
     headers = {"User-Agent": "GRXSCardScannerMicro-service", "Accept": "application/json"}
 
     cards_to_index = []
 
     while url:
-        response = response.get(url, headers=headers)
+        response = requests.get(url, headers=headers)
 
         # Too many requests
         if response.status_code == 429:
             time.sleep(2)
             continue
+
+        if response.status_code != 200:
+            break
         
         data = response.json()
 
@@ -233,13 +249,13 @@ def fetch_new_cards(set_code: str):
         for card in data.get('data', []):
             if 'image_uris' in card and 'border_crop' in card['image_uris'] and 'paper' in card['games']:
                 cards_to_index.append({
-                    "id": card['mtgo_id'],
+                    "id": card['id'],
                     "name": card['name'],
                     "set_code": card['set'],
-                    "image_uri": card['image_uris']['border_crop']
+                    "image_url": card['image_uris']['border_crop']
                 })
         
-        url = data.get('next_page') if data.get('has_mode') else None
+        url = data.get('next_page') if data.get('has_more') else None
         time.sleep(0.1)
 
     return cards_to_index
@@ -261,9 +277,9 @@ async def sync_set(set_code: str, x_api_key: str = Header(...)):
     '''
     
     if x_api_key != API_KEY:
-        raise HTTPException(status_code=401, details="Unauthorized execution attempt.")
+        raise HTTPException(status_code=401, detail="Unauthorized execution attempt.")
     
-    sync_new_cards(set_code, index, db_conn, model, processor)
+    sync_new_cards(set_code, index, db_conn)
 
     get_card_info.cache_clear()
 
@@ -283,7 +299,7 @@ async def scan_cards(file: UploadFile = File(...)):
     '''
     if not file.filename.lower().endswith(('.png','.jpg','.jpeg','.webp')):
         raise HTTPException(
-            satus_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid file format. Please upload a PNG or JEPG image."
         )
 
