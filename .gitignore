@@ -4,4 +4,5 @@ __pycache__/
 .vscode/
 *.pyc
 model_training/
+create_index.py
 onnx_dinov2/

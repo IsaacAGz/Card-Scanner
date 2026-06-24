@@ -92,6 +92,52 @@ def get_embedding(crop_list) -> np.ndarray:
 
     return embeddings
 
+
+def fetch_new_cards(set_code: str):
+    '''
+    Helper funciton that performs get request to srycall API to fetch all cards from selected 
+    set and returns as a list of dictionaries (cards) to be downloaded and embedded.
+
+    Args:
+        set_code: string that matches a MTG set, usually newly released sets.
+
+    Returns:
+        cards_to_index: list of dictionaries containing the card data for all cards in the set.
+    '''
+    url = f"https://api.scryfall.com/cards/search?q=set:{set_code.lower()}+is:unique"
+    headers = {"User-Agent": "GRXSCardScannerMicro-service", "Accept": "application/json"}
+
+    cards_to_index = []
+
+    while url:
+        response = requests.get(url, headers=headers)
+
+        # Too many requests
+        if response.status_code == 429:
+            time.sleep(2)
+            continue
+
+        if response.status_code != 200:
+            break
+        
+        data = response.json()
+
+        # Iterate through all cards to see if eligible to embedd and retrieve all data and uri for card image.
+        for card in data.get('data', []):
+            if 'image_uris' in card and 'border_crop' in card['image_uris'] and 'paper' in card['games']:
+                cards_to_index.append({
+                    "id": card['id'],
+                    "name": card['name'],
+                    "set_code": card['set'],
+                    "image_url": card['image_uris']['border_crop']
+                })
+        
+        url = data.get('next_page') if data.get('has_more') else None
+        time.sleep(0.1)
+
+    return cards_to_index
+
+
 def sync_new_cards(set_code: str, faiss_index, sqlite_conn):
     '''
 
@@ -216,49 +262,7 @@ def process_image(frame):
 
     return {"count": len(found_cards_info), "cards": found_cards_info}
 
-def fetch_new_cards(set_code: str):
-    '''
-    Helper funciton that performs get request to srycall API to fetch all cards from selected 
-    set and returns as a list of dictionaries (cards) to be downloaded and embedded.
 
-    Args:
-        set_code: string that matches a MTG set, usually newly released sets.
-
-    Returns:
-        cards_to_index: list of dictionaries containing the card data for all cards in the set.
-    '''
-    url = f"https://api.scryfall.com/cards/search?q=set:{set_code.lower()}+is:unique"
-    headers = {"User-Agent": "GRXSCardScannerMicro-service", "Accept": "application/json"}
-
-    cards_to_index = []
-
-    while url:
-        response = requests.get(url, headers=headers)
-
-        # Too many requests
-        if response.status_code == 429:
-            time.sleep(2)
-            continue
-
-        if response.status_code != 200:
-            break
-        
-        data = response.json()
-
-        # Iterate through all cards to see if eligible to embedd and retrieve all data and uri for card image.
-        for card in data.get('data', []):
-            if 'image_uris' in card and 'border_crop' in card['image_uris'] and 'paper' in card['games']:
-                cards_to_index.append({
-                    "id": card['id'],
-                    "name": card['name'],
-                    "set_code": card['set'],
-                    "image_url": card['image_uris']['border_crop']
-                })
-        
-        url = data.get('next_page') if data.get('has_more') else None
-        time.sleep(0.1)
-
-    return cards_to_index
 
 
 @app.get("/health")
