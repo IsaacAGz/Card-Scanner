@@ -3,6 +3,11 @@ venv/
 __pycache__/
 .vscode/
 *.pyc
+.env
 model_training/
 create_index.py
 onnx_dinov2/
+mtg_cards.index
+debug_warp/
+*.pt
+!app/mtg_yolo_best.pt

@@ -1,0 +1,12 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./app/mtg_yolo_best.pt:/app/mtg_yolo_best.pt
+      - ./mtg_cards.db:/app/mtg_cards.db
+      - ./mtg_cards.index:/app/mtg_cards.index
+      - ./onnx_dinov2:/app/onnx_dinov2

@@ -1,4 +1,8 @@
-from fastapi import FastAPI, UploadFile, File, status, HTTPException, Header, Security
+from fastapi import FastAPI, UploadFile, File, status, HTTPException, Header
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import Response, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 from transformers import AutoImageProcessor
 from contextlib import asynccontextmanager
 from ultralytics import YOLO
@@ -7,13 +11,16 @@ import onnxruntime as ort
 import requests
 import time
 import urllib.request
-import torch
 import os
 import faiss
 import cv2
 import numpy as np
 import uvicorn
 import sqlite3
+import tempfile
+
+from card_images import build_card_images_zip
+from video_scan import detect_card_boxes, process_video
 
 ort_session = None
 processor = None
@@ -23,14 +30,21 @@ db_conn = None
 
 load_dotenv()
 API_KEY = os.getenv("ADMIN_KEY")
+YOLO_WEIGHTS = os.getenv("YOLO_WEIGHTS", "mtg_yolo_best.pt")
+MAX_VIDEO_BYTES = 100 * 1024 * 1024
+VIDEO_EXTENSIONS = (".mp4", ".mov", ".avi", ".mkv", ".webm")
+DIST_THRESHOLD = 300
+FAISS_INDEX_PATH = "mtg_cards.index"
+DEFAULT_YOLO_CONF = 0.75
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global ort_session, processor, index, db_conn, yolo
 
-    # Load YOLO model for card object detection, using default model for now
-    print("Loading YOLO detection weights...")
-    yolo = YOLO("yolo11s.pt")
+    print(f"Loading YOLO detection weights from {YOLO_WEIGHTS}...")
+    if not os.path.exists(YOLO_WEIGHTS):
+        raise FileNotFoundError(f"YOLO weights file '{YOLO_WEIGHTS}' not found.")
+    yolo = YOLO(YOLO_WEIGHTS)
 
     print("Loading optimized ONNX models...")
     providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
@@ -38,11 +52,11 @@ async def lifespan(app: FastAPI):
     processor = AutoImageProcessor.from_pretrained("onnx_dinov2")
 
     # FAISS Index initializer
-    if os.path.exists("mtg_cards.index"):
+    if os.path.exists(FAISS_INDEX_PATH):
         print("Loading FAISS index...")
-        index = faiss.read_index("mtg_cards.index")
+        index = faiss.read_index(FAISS_INDEX_PATH)
     else:
-        raise FileNotFoundError("FAISS index file 'mtg_cards.index' not found.")
+        raise FileNotFoundError(f"FAISS index file '{FAISS_INDEX_PATH}' not found.")
 
 
     # Card DB 
@@ -54,6 +68,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+class CardRef(BaseModel):
+    name: str
+    set: str
+
+class CardImagesRequest(BaseModel):
+    cards: list[CardRef] = Field(min_length=1)
+
 def get_card_info(faiss_id: int):
     ''' Uses faiss id in database to pull card attributes.
 
@@ -61,14 +84,14 @@ def get_card_info(faiss_id: int):
         int: value for db index lookup
 
     Returns: 
-        int: sql cursor query values: name, set_code
+        tuple: name, set_code, scryfall_id
 
     '''
     if faiss_id < 0:
         return None
     cursor  = db_conn.cursor()
     cursor.execute("""
-                    SELECT name, set_code
+                    SELECT name, set_code, scryfall_id
                     FROM cards
                     where faiss_id = ?                   
                 """,
@@ -91,6 +114,43 @@ def get_embedding(crop_list) -> np.ndarray:
     embeddings = ort_outputs[0][:, 0, :].astype('float32')
 
     return embeddings
+
+
+def identify_crops(crop_list, boxes, dist_threshold: float = DIST_THRESHOLD) -> list[dict]:
+    '''Embed crops and identify cards via FAISS + SQLite lookup.
+
+    Returns one entry per detected box, including unmatched cards.
+    '''
+    if not crop_list:
+        return []
+
+    all_vectors = get_embedding(crop_list)
+    all_distances, all_indices = index.search(all_vectors, k=1)
+
+    detections: list[dict] = []
+    for i, box in enumerate(boxes):
+        dist_val = float(all_distances[i][0])
+        card_idx = all_indices[i][0]
+        card_info = get_card_info(card_idx)
+        is_identified = dist_val <= dist_threshold
+
+        detection = {
+            "box": box,
+            "identified": is_identified,
+            "dist": dist_val,
+            "name": None,
+            "set": None,
+            "scryfall_id": None,
+        }
+
+        if is_identified:
+            detection["name"] = card_info[0] if card_info else "Unknown"
+            detection["set"] = card_info[1] if card_info else "Unknown"
+            detection["scryfall_id"] = card_info[2] if card_info else None
+
+        detections.append(detection)
+
+    return detections
 
 
 def fetch_new_cards(set_code: str):
@@ -138,12 +198,10 @@ def fetch_new_cards(set_code: str):
     return cards_to_index
 
 
-def sync_new_cards(set_code: str, faiss_index, sqlite_conn):
-    '''
-
-    '''
+def sync_new_cards(set_code: str, faiss_index, sqlite_conn) -> int:
+    '''Fetch, embed, and index cards from a Scryfall set not already in the database.'''
     new_cards = fetch_new_cards(set_code)
-    print(f"Found {len(new_cards)} new cards to index.")
+    print(f"Found {len(new_cards)} cards from Scryfall for set {set_code}.")
 
     cursor = sqlite_conn.cursor()
 
@@ -170,12 +228,12 @@ def sync_new_cards(set_code: str, faiss_index, sqlite_conn):
             valid_cards_metadata.append(card)
             
         except Exception as e:
-            print(f"Failed to process card{card['name']}: {e}")
+            print(f"Failed to process card {card['name']}: {e}")
             continue
     
     if not crop_list:
         print("No new unique cards to index.")
-        return
+        return 0
 
     print(f"Generating embeddings for a batch of {len(crop_list)} cards...")
     
@@ -184,20 +242,25 @@ def sync_new_cards(set_code: str, faiss_index, sqlite_conn):
     start_faiss_id = faiss_index.ntotal
     faiss_index.add(all_vectors)
 
-    for i, card in enumerate(crop_list):
+    for i, card in enumerate(valid_cards_metadata):
         assigned_faiss_id = start_faiss_id + i
 
         cursor.execute("""
             INSERT INTO cards (faiss_id, scryfall_id, name, set_code)
-            VALUES (?, ?, ?)
+            VALUES (?, ?, ?, ?)
             """, (assigned_faiss_id, card['id'], card['name'], card['set_code']))
     
     sqlite_conn.commit()
-    print(f"Succesfully batch-indexed {len(valid_cards_metadata)} cards into database and FAISS.")
+    faiss.write_index(faiss_index, FAISS_INDEX_PATH)
+    print(f"Successfully batch-indexed {len(valid_cards_metadata)} cards into database and FAISS.")
+    return len(valid_cards_metadata)
 
-                
-
-def process_image(frame):
+def process_image(
+    frame,
+    save_yolo: bool = False,
+    conf: float = DEFAULT_YOLO_CONF,
+    dist_threshold: float = DIST_THRESHOLD,
+):
     '''Crops image, performs vector embedding, to retrieve card attributes.
 
     Args: 
@@ -206,69 +269,69 @@ def process_image(frame):
     Returns:
         Dictionary: containing number of cards and and the information of the cards obtained
     '''
-    results = yolo(frame, save=True, conf=.75)
-
-    found_cards_info = []
-    found_boxes = []
-    crop_list = []
-
-    height, width, _ = frame.shape
-
-    for prediction in results[0].boxes:
-
-        # Crop predicted card to get faiss index from embedding model
-        xyxy = prediction.xyxy[0].tolist()
-        
-        # Card/s boundaries in image
-        xmin = max(0, int(xyxy[0]))
-        ymin = max(0, int(xyxy[1]))
-        xmax = min(width, int(xyxy[2]))
-        ymax = min(height, int(xyxy[3]))
-
-        card_crop = frame[ymin:ymax, xmin:xmax]
-        if card_crop.size == 0: continue
-
-        rgb_crop = cv2.cvtColor(card_crop, cv2.COLOR_BGR2RGB)
-        crop_list.append(rgb_crop)
-        found_boxes.append([xmin, ymin, xmax, ymax])
+    boxes, crop_list = detect_card_boxes(frame, yolo, conf=conf, save_yolo=save_yolo)
 
     if not crop_list:
-        return {"count": 0, "cards": []}
+        return {
+            "detected_count": 0,
+            "identified_count": 0,
+            "count": 0,
+            "cards": [],
+            "detections": [],
+        }
 
-    # FAISS ID embedding vector
-    all_vectors = get_embedding(crop_list) 
+    detections = identify_crops(crop_list, boxes, dist_threshold=dist_threshold)
+    found_cards_info = [
+        {
+            "name": detection["name"],
+            "set": detection["set"],
+            "dist": detection["dist"],
+            "box": detection["box"],
+        }
+        for detection in detections
+        if detection["identified"]
+    ]
 
-    all_distances, all_indices = index.search(all_vectors, k=1)
-
-    # Lookup cards by searching vector space for all cards(vectors found)
-    for i, box in enumerate(found_boxes):
-        dist_val = float(all_distances[i][0])
-
-        # Card distance threshold
-        if dist_val > 300:
-            continue
-
-        card_idx = all_indices[i][0]
-
-        card_info = get_card_info(card_idx)
-
-        # Append found card and card attributes if database card close enough to cropped embedded card
-        found_cards_info.append({
-            "name": card_info[0] if card_info else "Unknown",
-            "set": card_info[1] if card_info else "Unknown",
-            "dist": dist_val,
-            "box": box
-        })
-
-    return {"count": len(found_cards_info), "cards": found_cards_info}
+    return {
+        "detected_count": len(detections),
+        "identified_count": len(found_cards_info),
+        "count": len(found_cards_info),
+        "cards": found_cards_info,
+        "detections": detections,
+    }
 
 
+def run_process_video(
+    path: str,
+    frame_stride: int,
+    max_frames: int,
+    conf: float = DEFAULT_YOLO_CONF,
+    dist_threshold: float = DIST_THRESHOLD,
+) -> dict:
+    return process_video(
+        path,
+        yolo=yolo,
+        identify_crops=identify_crops,
+        frame_stride=frame_stride,
+        max_frames=max_frames,
+        conf=conf,
+        dist_threshold=dist_threshold,
+    )
 
 
 @app.get("/health")
 async def health():
     '''Health check for API'''
     return {"status": "healthy"}
+
+
+@app.get("/ui")
+async def ui_redirect():
+    return RedirectResponse(url="/ui/")
+
+
+if os.path.isdir(STATIC_DIR):
+    app.mount("/ui", StaticFiles(directory=STATIC_DIR, html=True), name="ui")
 
 @app.post("/admin/sync-set")
 async def sync_set(set_code: str, x_api_key: str = Header(...)):
@@ -283,15 +346,20 @@ async def sync_set(set_code: str, x_api_key: str = Header(...)):
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized execution attempt.")
     
-    sync_new_cards(set_code, index, db_conn)
+    added_count = sync_new_cards(set_code, index, db_conn)
 
-    get_card_info.cache_clear()
-
-    return {"message": f"Set {set_code.upper()} successfully, synced into lookup space."}
+    return {
+        "message": f"Set {set_code.upper()} synced into lookup space.",
+        "cards_added": added_count,
+    }
 
 
 @app.post("/scan", status_code=status.HTTP_200_OK)
-async def scan_cards(file: UploadFile = File(...)):
+async def scan_cards(
+    file: UploadFile = File(...),
+    conf: float = DEFAULT_YOLO_CONF,
+    dist_threshold: float = DIST_THRESHOLD,
+):
     '''Scanning card endpoint for API
 
     Args:
@@ -301,6 +369,11 @@ async def scan_cards(file: UploadFile = File(...)):
         json with number of cards and information of found cards
 
     '''
+    if conf <= 0 or conf > 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="conf must be between 0 and 1.")
+    if dist_threshold <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="dist_threshold must be > 0.")
+
     if not file.filename.lower().endswith(('.png','.jpg','.jpeg','.webp')):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -317,9 +390,88 @@ async def scan_cards(file: UploadFile = File(...)):
             detail="Could not decode the uploading image file."
         )
 
-    results = process_image(frame)
+    results = process_image(frame, conf=conf, dist_threshold=dist_threshold)
 
     return results
+
+
+@app.post("/scan/video", status_code=status.HTTP_200_OK)
+async def scan_video(
+    file: UploadFile = File(...),
+    frame_stride: int = 5,
+    max_frames: int = 300,
+    conf: float = DEFAULT_YOLO_CONF,
+    dist_threshold: float = DIST_THRESHOLD,
+):
+    '''Scan a video and return unique cards identified across sampled frames.'''
+    if not file.filename or not file.filename.lower().endswith(VIDEO_EXTENSIONS):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file format. Upload MP4, MOV, AVI, MKV, or WEBM.",
+        )
+
+    if frame_stride < 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="frame_stride must be >= 1.")
+    if max_frames < 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="max_frames must be >= 1.")
+    if conf <= 0 or conf > 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="conf must be between 0 and 1.")
+    if dist_threshold <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="dist_threshold must be > 0.")
+
+    contents = await file.read()
+    if len(contents) > MAX_VIDEO_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Video exceeds max size of {MAX_VIDEO_BYTES // (1024 * 1024)} MB.",
+        )
+
+    suffix = os.path.splitext(file.filename)[1] or ".mp4"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(contents)
+        tmp_path = tmp.name
+
+    try:
+        results = await run_in_threadpool(
+            run_process_video,
+            tmp_path,
+            frame_stride,
+            max_frames,
+            conf,
+            dist_threshold,
+        )
+        return results
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    finally:
+        os.unlink(tmp_path)
+
+
+@app.post("/cards/images-zip")
+async def download_card_images(payload: CardImagesRequest):
+    '''Return a ZIP of Scryfall border_crop images for the requested cards.'''
+    try:
+        zip_bytes = await run_in_threadpool(
+            build_card_images_zip,
+            [card.model_dump() for card in payload.cards],
+            db_conn,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to fetch card images: {exc}",
+        ) from exc
+
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=detected_cards.zip"},
+    )
 
 
 if __name__ == "__main__":

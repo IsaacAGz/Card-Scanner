@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MTG Card Scanner</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <div>
+        <h1>MTG Card Scanner</h1>
+        <p class="subtitle">Upload a photo or video to detect and identify Magic cards.</p>
+      </div>
+      <a class="api-link" href="/docs" target="_blank" rel="noopener">API docs</a>
+    </header>
+
+    <nav class="tabs" role="tablist" aria-label="Scan mode">
+      <button class="tab active" role="tab" aria-selected="true" data-tab="image">Image scan</button>
+      <button class="tab" role="tab" aria-selected="false" data-tab="video">Video scan</button>
+    </nav>
+
+    <section class="panel active" id="panel-image" role="tabpanel">
+      <form id="form-image" class="scan-form">
+        <label class="file-label">
+          <span class="file-label-text">Choose an image</span>
+          <input type="file" id="image-file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" required>
+        </label>
+        <p class="hint">PNG, JPG, JPEG, or WEBP</p>
+        <button type="submit" class="btn primary">Scan image</button>
+      </form>
+    </section>
+
+    <section class="panel" id="panel-video" role="tabpanel" hidden>
+      <form id="form-video" class="scan-form">
+        <label class="file-label">
+          <span class="file-label-text">Choose a video</span>
+          <input type="file" id="video-file" accept=".mp4,.mov,.avi,.mkv,.webm,video/*" required>
+        </label>
+        <p class="hint">MP4, MOV, AVI, MKV, or WEBM — max 100 MB. Long clips may take several minutes.</p>
+        <button type="submit" class="btn primary">Scan video</button>
+      </form>
+    </section>
+
+    <details class="settings">
+      <summary>Advanced settings</summary>
+      <div class="settings-grid">
+        <label>
+          Detection confidence
+          <input type="number" id="conf" min="0.01" max="1" step="0.05" value="0.75">
+        </label>
+        <label>
+          Distance threshold
+          <input type="number" id="dist-threshold" min="1" step="1" value="300">
+        </label>
+        <label class="video-only">
+          Frame stride
+          <input type="number" id="frame-stride" min="1" step="1" value="5">
+        </label>
+        <label class="video-only">
+          Max frames
+          <input type="number" id="max-frames" min="1" step="1" value="300">
+        </label>
+      </div>
+    </details>
+
+    <div id="status" class="status hidden" role="status" aria-live="polite">
+      <div class="spinner" aria-hidden="true"></div>
+      <span id="status-text">Processing…</span>
+    </div>
+
+    <div id="error" class="error hidden" role="alert"></div>
+
+    <section id="results" class="results hidden">
+      <div class="results-header">
+        <h2 id="results-title">Results</h2>
+        <button type="button" id="download-zip" class="btn secondary hidden">Download card images (ZIP)</button>
+      </div>
+      <p id="results-summary" class="results-summary"></p>
+      <div id="preview-wrap" class="preview-wrap hidden">
+        <canvas id="preview-canvas"></canvas>
+        <p class="preview-legend">
+          <span class="legend-item legend-matched">Identified</span>
+          <span class="legend-item legend-unmatched">Unmatched</span>
+        </p>
+      </div>
+      <div id="video-meta" class="video-meta hidden"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr id="results-head-row">
+              <th>Name</th>
+              <th>Set</th>
+              <th>Distance</th>
+            </tr>
+          </thead>
+          <tbody id="results-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
