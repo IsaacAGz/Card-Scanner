@@ -53,6 +53,23 @@ YOLO_WEIGHTS=mtg_yolo_best.pt
 ADMIN_KEY=your-secret-key
 ```
 
+Optional video settings:
+
+```
+MAX_VIDEO_BYTES=524288000
+CROP_JOB_TTL_HOURS=24
+EMBEDDING_DEDUP_THRESHOLD=100
+```
+
+Optional image crop export settings:
+
+```
+MAX_IMAGE_UPLOAD_BYTES=52428800
+MAX_IMAGES_PER_REQUEST=50
+MAX_ZIP_INPUT_BYTES=524288000
+MAX_ZIP_UNCOMPRESSED_BYTES=1073741824
+```
+
 ### 3. Verify artifacts
 
 ```bash
@@ -115,6 +132,27 @@ Scans a video and returns **unique cards** across sampled frames (track deduplic
 - **Body:** form-data `file` (MP4, MOV, AVI, MKV, WEBM)
 - **Query params:** `frame_stride` (default `5`), `max_frames` (default `300`), `conf`, `dist_threshold`
 
+### `POST /scan/video/crops`
+Starts an **async job** that extracts deduplicated **camera crops** from a video (for video editing, not Scryfall art).
+- **Body:** form-data `file` (MP4, MOV, AVI, MKV, WEBM)
+- **Response:** `202` with `{ job_id, status, poll_url }`
+- **Query params:** `sample_interval_sec` (default `5`), `max_samples` (default `0` = unlimited), `conf`, `identify` (default `false`), `dist_threshold`, `embedding_dedup_threshold` (default `100`), `track_expiry_samples` (default `3`), `no_embedding_dedup` (default `false`)
+
+### `GET /scan/video/crops/{job_id}`
+Poll job status and progress. When complete, returns `manifest`, `crop_count`, and `download_url`.
+
+### `GET /scan/video/crops/{job_id}/download`
+Download the ZIP of cropped card images + `manifest.json`. Returns `409` while the job is still running.
+
+### `POST /scan/images/crops-zip`
+Extract **camera crops** from uploaded photos or a ZIP of images (synchronous; returns the ZIP directly).
+- **Body (mutually exclusive):**
+  - `files` — one or more image files (PNG, JPG, JPEG, WEBP), or
+  - `file` — single `.zip` archive containing images
+- **Query params:** `conf` (default `0.75`), `identify` (default `false`), `dist_threshold` (default `300`)
+- **Response:** `200` + `application/zip` (`image_crops.zip` with `manifest.json`)
+- **Limits:** 50 MB per image, 50 images per request, 500 MB ZIP upload, 1 GB uncompressed ZIP guard (configurable via env)
+
 ### `POST /cards/images-zip`
 Returns a ZIP of Scryfall `border_crop` images for a JSON list of cards.
 
@@ -127,11 +165,14 @@ Adds cards from a new Scryfall set to the index. Requires header `X-Api-Key` mat
 
 With the API running, open [http://localhost:8000/ui](http://localhost:8000/ui):
 
-- **Image scan** — upload a photo and view detected cards
-- **Video scan** — upload a clip; shows unique cards with loading state for long jobs
-- **Download card images (ZIP)** — fetches Scryfall border crops for scan results
+- **Image scan** — upload a photo and view detected cards with bounding boxes
+- **Extract card crops (ZIP)** (image tab) — upload multiple photos or one ZIP; downloads warped camera crops for editing
+- **Video scan** — upload a clip; shows unique identified cards
+- **Extract card crops (ZIP)** (video tab) — async background job; samples the video, deduplicates crops, and downloads camera footage crops for video editing
+- **Download Scryfall images** — fetches Scryfall border crops for identification scan results
+- **Download crops ZIP** — re-downloads camera crops from a completed crop extraction job
 
-Advanced settings (confidence, distance threshold, frame stride, max frames) are available in the UI.
+Advanced settings include confidence, distance threshold, optional crop identification, frame stride, sample interval, and embedding dedup threshold.
 
 ---
 
@@ -152,6 +193,32 @@ curl -X POST "http://localhost:8000/scan/video?frame_stride=5&max_frames=300" \
   -F "file=@test_clip.mp4"
 ```
 
+### Image crop extraction
+
+```bash
+# Multiple images
+curl -X POST "http://localhost:8000/scan/images/crops-zip" \
+  -F "files=@photo1.jpg" -F "files=@photo2.jpg" -o image_crops.zip
+
+# ZIP of images
+curl -X POST "http://localhost:8000/scan/images/crops-zip?identify=true" \
+  -F "file=@binder_photos.zip" -o image_crops.zip
+```
+
+### Video crop extraction (async)
+
+```bash
+# Start job
+curl -X POST "http://localhost:8000/scan/video/crops?sample_interval_sec=5" \
+  -F "file=@test_clip.mp4"
+
+# Poll status (replace JOB_ID)
+curl "http://localhost:8000/scan/video/crops/JOB_ID"
+
+# Download ZIP when complete
+curl -OJ "http://localhost:8000/scan/video/crops/JOB_ID/download"
+```
+
 ### Card images ZIP
 
 ```bash
@@ -166,6 +233,10 @@ curl -X POST "http://localhost:8000/cards/images-zip" \
 ```bash
 python app_testing/test_client.py
 python app_testing/test_video_client.py path/to/clip.mp4
+python app_testing/test_video_crops_client.py path/to/clip.mp4 --output video_crops.zip
+python app_testing/test_image_crops_client.py --images photo1.jpg photo2.jpg -o image_crops.zip
+python app_testing/test_image_crops_client.py --zip binder_photos.zip -o image_crops.zip
+python app_testing/test_image_crops_zip.py
 ```
 
 ---

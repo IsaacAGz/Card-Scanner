@@ -15,6 +15,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Application code
 COPY app/main.py .
 COPY app/video_scan.py .
+COPY app/video_crops.py .
+COPY app/image_crops.py .
+COPY app/crop_export.py .
+COPY app/crop_job_worker.py .
+COPY app/job_manager.py .
+COPY app/inference_runtime.py .
 COPY app/card_images.py .
 COPY app/card_warp.py .
 COPY app/static/ ./static/

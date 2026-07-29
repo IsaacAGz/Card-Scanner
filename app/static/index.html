@@ -24,11 +24,14 @@
     <section class="panel active" id="panel-image" role="tabpanel">
       <form id="form-image" class="scan-form">
         <label class="file-label">
-          <span class="file-label-text">Choose an image</span>
-          <input type="file" id="image-file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" required>
+          <span class="file-label-text">Choose image(s)</span>
+          <input type="file" id="image-file" accept=".png,.jpg,.jpeg,.webp,.zip,image/png,image/jpeg,image/webp,application/zip" multiple required>
         </label>
-        <p class="hint">PNG, JPG, JPEG, or WEBP</p>
-        <button type="submit" class="btn primary">Scan image</button>
+        <p class="hint">Select multiple images or one ZIP of images (PNG, JPG, JPEG, WEBP). Max 50 images per request.</p>
+        <div class="button-row">
+          <button type="submit" class="btn primary">Scan image</button>
+          <button type="button" id="btn-extract-image-crops" class="btn secondary">Extract card crops (ZIP)</button>
+        </div>
       </form>
     </section>
 
@@ -38,8 +41,11 @@
           <span class="file-label-text">Choose a video</span>
           <input type="file" id="video-file" accept=".mp4,.mov,.avi,.mkv,.webm,video/*" required>
         </label>
-        <p class="hint">MP4, MOV, AVI, MKV, or WEBM — max 100 MB. Long clips may take several minutes.</p>
-        <button type="submit" class="btn primary">Scan video</button>
+        <p class="hint">MP4, MOV, AVI, MKV, or WEBM — max 500 MB. Crop extraction runs in the background; long clips may take several minutes.</p>
+        <div class="button-row">
+          <button type="submit" class="btn primary">Scan video</button>
+          <button type="button" id="btn-extract-crops" class="btn secondary">Extract card crops (ZIP)</button>
+        </div>
       </form>
     </section>
 
@@ -62,6 +68,22 @@
           Max frames
           <input type="number" id="max-frames" min="1" step="1" value="300">
         </label>
+        <label class="video-only">
+          Sample interval (sec)
+          <input type="number" id="sample-interval-sec" min="0.1" step="0.1" value="5">
+        </label>
+        <label class="video-only">
+          Max samples
+          <input type="number" id="max-samples" min="0" step="1" value="0">
+        </label>
+        <label class="video-only">
+          Embedding dedup threshold
+          <input type="number" id="embedding-dedup-threshold" min="1" step="1" value="100">
+        </label>
+        <label class="crop-only checkbox-label">
+          <input type="checkbox" id="crop-identify">
+          Identify crops (slower)
+        </label>
       </div>
     </details>
 
@@ -75,7 +97,10 @@
     <section id="results" class="results hidden">
       <div class="results-header">
         <h2 id="results-title">Results</h2>
-        <button type="button" id="download-zip" class="btn secondary hidden">Download card images (ZIP)</button>
+        <div class="results-actions">
+          <button type="button" id="download-scryfall-zip" class="btn secondary hidden">Download Scryfall images</button>
+          <button type="button" id="download-crops-zip" class="btn secondary hidden">Download crops ZIP</button>
+        </div>
       </div>
       <p id="results-summary" class="results-summary"></p>
       <div id="preview-wrap" class="preview-wrap hidden">

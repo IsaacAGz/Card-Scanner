@@ -43,6 +43,8 @@ class Track:
     last_seen_frame: int
     card: dict | None = None
     first_seen_sec: float = 0.0
+    crop_saved: bool = False
+    saved_crop_index: int | None = None
 
 
 @dataclass
@@ -51,11 +53,12 @@ class TrackManager:
     next_track_id: int = 0
     unique_cards: dict[tuple[str, str], dict] = field(default_factory=dict)
 
-    def expire_stale(self, current_frame: int) -> None:
+    def expire_stale(self, current_frame: int, expiry_frames: int | None = None) -> None:
+        limit = expiry_frames if expiry_frames is not None else TRACK_EXPIRY_FRAMES
         self.tracks = [
             track
             for track in self.tracks
-            if current_frame - track.last_seen_frame <= TRACK_EXPIRY_FRAMES
+            if current_frame - track.last_seen_frame <= limit
         ]
 
     def match_box(self, box: list[int]) -> Track | None:

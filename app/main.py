@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, status, HTTPException, Header
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import Response, RedirectResponse
+from fastapi.responses import Response, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from transformers import AutoImageProcessor
@@ -18,8 +18,12 @@ import numpy as np
 import uvicorn
 import sqlite3
 import tempfile
+import threading
 
 from card_images import build_card_images_zip
+from crop_job_worker import CropJobParams, run_crop_job
+from image_crops import IMAGE_EXTENSIONS, process_images_crops_from_uploads
+from job_manager import JobManager
 from video_scan import detect_card_boxes, process_video
 
 ort_session = None
@@ -27,11 +31,18 @@ processor = None
 yolo = None
 index = None
 db_conn = None
+job_manager = None
 
 load_dotenv()
 API_KEY = os.getenv("ADMIN_KEY")
 YOLO_WEIGHTS = os.getenv("YOLO_WEIGHTS", "mtg_yolo_best.pt")
-MAX_VIDEO_BYTES = 100 * 1024 * 1024
+MAX_VIDEO_BYTES = int(os.getenv("MAX_VIDEO_BYTES", str(500 * 1024 * 1024)))
+MAX_IMAGE_UPLOAD_BYTES = int(os.getenv("MAX_IMAGE_UPLOAD_BYTES", str(50 * 1024 * 1024)))
+MAX_IMAGES_PER_REQUEST = int(os.getenv("MAX_IMAGES_PER_REQUEST", "50"))
+MAX_ZIP_INPUT_BYTES = int(os.getenv("MAX_ZIP_INPUT_BYTES", str(500 * 1024 * 1024)))
+MAX_ZIP_UNCOMPRESSED_BYTES = int(os.getenv("MAX_ZIP_UNCOMPRESSED_BYTES", str(1024 * 1024 * 1024)))
+CROP_JOB_TTL_HOURS = float(os.getenv("CROP_JOB_TTL_HOURS", "24"))
+DEFAULT_EMBEDDING_DEDUP_THRESHOLD = float(os.getenv("EMBEDDING_DEDUP_THRESHOLD", "100"))
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".avi", ".mkv", ".webm")
 DIST_THRESHOLD = 300
 FAISS_INDEX_PATH = "mtg_cards.index"
@@ -39,7 +50,7 @@ DEFAULT_YOLO_CONF = 0.75
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global ort_session, processor, index, db_conn, yolo
+    global ort_session, processor, index, db_conn, yolo, job_manager
 
     print(f"Loading YOLO detection weights from {YOLO_WEIGHTS}...")
     if not os.path.exists(YOLO_WEIGHTS):
@@ -61,6 +72,12 @@ async def lifespan(app: FastAPI):
 
     # Card DB 
     db_conn = sqlite3.connect('mtg_cards.db', check_same_thread=False)
+
+    job_manager = JobManager()
+    removed_jobs = job_manager.cleanup_old_jobs(CROP_JOB_TTL_HOURS)
+    if removed_jobs:
+        print(f"Cleaned up {removed_jobs} expired crop job(s).")
+
     print("Assets loaded successfully.")
 
     yield
@@ -448,6 +465,281 @@ async def scan_video(
         ) from exc
     finally:
         os.unlink(tmp_path)
+
+
+def _validate_video_upload(filename: str | None) -> None:
+    if not filename or not filename.lower().endswith(VIDEO_EXTENSIONS):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file format. Upload MP4, MOV, AVI, MKV, or WEBM.",
+        )
+
+
+def _crop_job_status_payload(job) -> dict:
+    payload = {
+        "job_id": job.job_id,
+        "status": job.status,
+        "progress": job.progress,
+        "crop_count": job.result.get("crop_count", 0) if job.result else job.progress.get("crops_saved", 0),
+        "error": job.error,
+    }
+
+    if job.status == "completed":
+        payload["manifest"] = job.manifest or []
+        payload["download_url"] = f"/scan/video/crops/{job.job_id}/download"
+        if job.result:
+            payload["result"] = {
+                "video": job.result.get("video"),
+                "crop_count": job.result.get("crop_count", 0),
+                "skipped_embedding_duplicates": job.result.get("skipped_embedding_duplicates", 0),
+                "identified": job.result.get("identified", False),
+            }
+
+    return payload
+
+
+@app.post("/scan/video/crops", status_code=status.HTTP_202_ACCEPTED)
+async def start_video_crop_job(
+    file: UploadFile = File(...),
+    sample_interval_sec: float = 5.0,
+    max_samples: int = 0,
+    conf: float = DEFAULT_YOLO_CONF,
+    identify: bool = False,
+    dist_threshold: float = DIST_THRESHOLD,
+    embedding_dedup_threshold: float = DEFAULT_EMBEDDING_DEDUP_THRESHOLD,
+    track_expiry_samples: int = 3,
+    no_embedding_dedup: bool = False,
+):
+    '''Start an async job that extracts deduplicated card crops from a video.'''
+    _validate_video_upload(file.filename)
+
+    if sample_interval_sec <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="sample_interval_sec must be > 0.")
+    if max_samples < 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="max_samples must be >= 0.")
+    if track_expiry_samples < 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="track_expiry_samples must be >= 1.")
+    if conf <= 0 or conf > 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="conf must be between 0 and 1.")
+    if dist_threshold <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="dist_threshold must be > 0.")
+    if embedding_dedup_threshold <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="embedding_dedup_threshold must be > 0.",
+        )
+
+    contents = await file.read()
+    if len(contents) > MAX_VIDEO_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Video exceeds max size of {MAX_VIDEO_BYTES // (1024 * 1024)} MB.",
+        )
+
+    job = job_manager.create_job()
+    suffix = os.path.splitext(file.filename)[1] or ".mp4"
+    video_path = job.work_dir / f"upload{suffix}"
+    video_path.write_bytes(contents)
+
+    params = CropJobParams(
+        conf=conf,
+        sample_interval_sec=sample_interval_sec,
+        max_samples=max_samples,
+        track_expiry_samples=track_expiry_samples,
+        embedding_dedup_threshold=embedding_dedup_threshold,
+        identify=identify,
+        dist_threshold=dist_threshold,
+        no_embedding_dedup=no_embedding_dedup,
+    )
+
+    worker = threading.Thread(
+        target=run_crop_job,
+        kwargs={
+            "job_manager": job_manager,
+            "job_id": job.job_id,
+            "video_path": str(video_path),
+            "params": params,
+            "yolo": yolo,
+            "get_embedding": get_embedding,
+            "identify_crops": identify_crops,
+        },
+        daemon=True,
+    )
+    worker.start()
+
+    return {
+        "job_id": job.job_id,
+        "status": "queued",
+        "poll_url": f"/scan/video/crops/{job.job_id}",
+    }
+
+
+@app.get("/scan/video/crops/{job_id}", status_code=status.HTTP_200_OK)
+async def get_video_crop_job(job_id: str):
+    '''Poll status and progress for a video crop extraction job.'''
+    job = job_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
+
+    return _crop_job_status_payload(job)
+
+
+@app.get("/scan/video/crops/{job_id}/download")
+async def download_video_crop_job(job_id: str):
+    '''Download the ZIP archive for a completed video crop job.'''
+    job = job_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
+
+    if job.status in {"queued", "running"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Job is still running. Poll the status endpoint until it completes.",
+        )
+
+    if job.status == "failed":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=job.error or "Crop job failed.",
+        )
+
+    if job.zip_path is None or not job.zip_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No crops were detected for this job.",
+        )
+
+    return FileResponse(
+        path=job.zip_path,
+        media_type="application/zip",
+        filename=f"video_crops_{job_id}.zip",
+    )
+
+
+def run_process_images_crops(
+    *,
+    image_files: list[tuple[str, bytes]] | None,
+    zip_file: bytes | None,
+    conf: float,
+    identify: bool,
+    dist_threshold: float,
+    max_images: int,
+    max_uncompressed_bytes: int,
+):
+    return process_images_crops_from_uploads(
+        image_files=image_files,
+        zip_file=zip_file,
+        yolo=yolo,
+        conf=conf,
+        identify=identify,
+        identify_crops=identify_crops if identify else None,
+        dist_threshold=dist_threshold,
+        max_images=max_images,
+        max_uncompressed_bytes=max_uncompressed_bytes,
+    )
+
+
+def _validate_image_upload(filename: str | None) -> None:
+    if not filename or not filename.lower().endswith(tuple(IMAGE_EXTENSIONS)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file format. Upload PNG, JPG, JPEG, or WEBP.",
+        )
+
+
+def _validate_zip_upload(filename: str | None) -> None:
+    if not filename or not filename.lower().endswith(".zip"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file format. Upload a ZIP archive.",
+        )
+
+
+async def _read_upload_limited(upload: UploadFile, max_bytes: int, label: str) -> bytes:
+    contents = await upload.read()
+    if len(contents) > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"{label} exceeds max size of {max_bytes // (1024 * 1024)} MB.",
+        )
+    return contents
+
+
+@app.post("/scan/images/crops-zip", status_code=status.HTTP_200_OK)
+async def scan_images_crops_zip(
+    files: list[UploadFile] | None = File(default=None),
+    file: UploadFile | None = File(default=None),
+    conf: float = DEFAULT_YOLO_CONF,
+    identify: bool = False,
+    dist_threshold: float = DIST_THRESHOLD,
+):
+    '''Extract warped card crops from uploaded images or a ZIP archive and return a ZIP download.'''
+    has_files = bool(files)
+    has_zip = file is not None and bool(file.filename)
+
+    if has_files == has_zip:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide either files (one or more images) or file (one ZIP archive), but not both.",
+        )
+
+    if conf <= 0 or conf > 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="conf must be between 0 and 1.")
+    if dist_threshold <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="dist_threshold must be > 0.")
+
+    image_files: list[tuple[str, bytes]] | None = None
+    zip_bytes: bytes | None = None
+
+    if has_files:
+        if len(files) > MAX_IMAGES_PER_REQUEST:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Too many images. Maximum is {MAX_IMAGES_PER_REQUEST} per request.",
+            )
+
+        image_files = []
+        for upload in files:
+            _validate_image_upload(upload.filename)
+            contents = await _read_upload_limited(
+                upload,
+                MAX_IMAGE_UPLOAD_BYTES,
+                upload.filename or "Image",
+            )
+            source_name = os.path.basename(upload.filename or "image.jpg")
+            image_files.append((source_name, contents))
+    else:
+        _validate_zip_upload(file.filename)
+        zip_bytes = await _read_upload_limited(file, MAX_ZIP_INPUT_BYTES, file.filename or "ZIP archive")
+
+    try:
+        result = await run_in_threadpool(
+            run_process_images_crops,
+            image_files=image_files,
+            zip_file=zip_bytes,
+            conf=conf,
+            identify=identify,
+            dist_threshold=dist_threshold,
+            max_images=MAX_IMAGES_PER_REQUEST,
+            max_uncompressed_bytes=MAX_ZIP_UNCOMPRESSED_BYTES,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if "maximum uncompressed size" in message:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=message,
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=message,
+        ) from exc
+
+    return Response(
+        content=result.zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=image_crops.zip"},
+    )
 
 
 @app.post("/cards/images-zip")
