@@ -34,12 +34,13 @@ db_conn = None
 job_manager = None
 
 load_dotenv()
+APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
 API_KEY = os.getenv("ADMIN_KEY")
 YOLO_WEIGHTS = os.getenv("YOLO_WEIGHTS", "mtg_yolo_best.pt")
 MAX_VIDEO_BYTES = int(os.getenv("MAX_VIDEO_BYTES", str(500 * 1024 * 1024)))
-MAX_IMAGE_UPLOAD_BYTES = int(os.getenv("MAX_IMAGE_UPLOAD_BYTES", str(50 * 1024 * 1024)))
-MAX_IMAGES_PER_REQUEST = int(os.getenv("MAX_IMAGES_PER_REQUEST", "50"))
-MAX_ZIP_INPUT_BYTES = int(os.getenv("MAX_ZIP_INPUT_BYTES", str(500 * 1024 * 1024)))
+MAX_IMAGE_UPLOAD_BYTES = int(os.getenv("MAX_IMAGE_UPLOAD_BYTES", str(20 * 1024 * 1024)))
+MAX_IMAGES_PER_REQUEST = int(os.getenv("MAX_IMAGES_PER_REQUEST", "20"))
+MAX_ZIP_INPUT_BYTES = int(os.getenv("MAX_ZIP_INPUT_BYTES", str(100 * 1024 * 1024)))
 MAX_ZIP_UNCOMPRESSED_BYTES = int(os.getenv("MAX_ZIP_UNCOMPRESSED_BYTES", str(1024 * 1024 * 1024)))
 CROP_JOB_TTL_HOURS = float(os.getenv("CROP_JOB_TTL_HOURS", "24"))
 DEFAULT_EMBEDDING_DEDUP_THRESHOLD = float(os.getenv("EMBEDDING_DEDUP_THRESHOLD", "100"))
@@ -133,7 +134,7 @@ def get_embedding(crop_list) -> np.ndarray:
     return embeddings
 
 
-def identify_crops(crop_list, boxes, dist_threshold: float = DIST_THRESHOLD) -> list[dict]:
+def identify_crops(crop_list, boxes, dist_threshold: float = DIST_THRESHOLD, warped_flags: list[bool] | None = None) -> list[dict]:
     '''Embed crops and identify cards via FAISS + SQLite lookup.
 
     Returns one entry per detected box, including unmatched cards.
@@ -141,30 +142,39 @@ def identify_crops(crop_list, boxes, dist_threshold: float = DIST_THRESHOLD) -> 
     if not crop_list:
         return []
 
+    K = 10
     all_vectors = get_embedding(crop_list)
-    all_distances, all_indices = index.search(all_vectors, k=1)
+    all_distances, all_indices = index.search(all_vectors, k=K)
 
     detections: list[dict] = []
     for i, box in enumerate(boxes):
         dist_val = float(all_distances[i][0])
-        card_idx = all_indices[i][0]
+        card_idx = int(all_indices[i][0])
         card_info = get_card_info(card_idx)
         is_identified = dist_val <= dist_threshold
+
+        candidates = []
+        for j in range(all_indices.shape[1]):
+            fid = int(all_indices[i][j])
+            info = get_card_info(fid)
+            candidate.append({
+                "rank": j + 1,
+                "dist": float(all_distances[i][j]),
+                "name": info[0] if info else None,
+                "set":info[1] if into else None,
+            })
 
         detection = {
             "box": box,
             "identified": is_identified,
             "dist": dist_val,
-            "name": None,
-            "set": None,
-            "scryfall_id": None,
+            "name": card_info[0] if (is_identified, and card_info) else None,
+            "set": card_info[1] if (is_identified and card_info) else None,
+            "scryfall_id": card_info[2] if (is_identified and card_info) else None,
+            "candidates": candidates,
+            "warped": warped_flags[i] if warped_flags is not None else None,
         }
-
-        if is_identified:
-            detection["name"] = card_info[0] if card_info else "Unknown"
-            detection["set"] = card_info[1] if card_info else "Unknown"
-            detection["scryfall_id"] = card_info[2] if card_info else None
-
+        # print(box, detection["warped"], candidates[:5])
         detections.append(detection)
 
     return detections
@@ -264,7 +274,7 @@ def sync_new_cards(set_code: str, faiss_index, sqlite_conn) -> int:
 
         cursor.execute("""
             INSERT INTO cards (faiss_id, scryfall_id, name, set_code)
-            VALUES (?, ?, ?, ?)
+            VALUES (assigned_faiss_id, card['id'], card['name'], card['set_code'])
             """, (assigned_faiss_id, card['id'], card['name'], card['set_code']))
     
     sqlite_conn.commit()
@@ -286,7 +296,7 @@ def process_image(
     Returns:
         Dictionary: containing number of cards and and the information of the cards obtained
     '''
-    boxes, crop_list = detect_card_boxes(frame, yolo, conf=conf, save_yolo=save_yolo)
+    boxes, crop_list, warped = detect_card_boxes(frame, yolo, conf=conf, save_yolo=save_yolo)
 
     if not crop_list:
         return {
@@ -297,7 +307,7 @@ def process_image(
             "detections": [],
         }
 
-    detections = identify_crops(crop_list, boxes, dist_threshold=dist_threshold)
+    detections = identify_crops(crop_list, boxes, dist_threshold=dist_threshold, warped)
     found_cards_info = [
         {
             "name": detection["name"],
@@ -359,7 +369,9 @@ async def sync_set(set_code: str, x_api_key: str = Header(...)):
         set_code: string specifying desired set to sync
         x_api_key: string to verify admin, stored in header
     '''
-    
+    if APP_ENV == "production":
+        raise HTTPException(status_code=404, detail="Not found.")
+
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized execution attempt.")
     
@@ -386,6 +398,8 @@ async def scan_cards(
         json with number of cards and information of found cards
 
     '''
+
+
     if conf <= 0 or conf > 1:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="conf must be between 0 and 1.")
     if dist_threshold <= 0:

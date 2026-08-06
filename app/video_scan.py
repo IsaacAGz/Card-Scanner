@@ -105,6 +105,7 @@ def detect_card_boxes(frame, yolo, conf: float = 0.75, save_yolo: bool = False) 
     results = yolo(frame, save=save_yolo, conf=conf)
     boxes: list[list[int]] = []
     crops: list[np.ndarray] = []
+    warped_flags: list[bool] = []
 
     height, width, _ = frame.shape
     if not results or results[0].boxes is None:
@@ -118,14 +119,15 @@ def detect_card_boxes(frame, yolo, conf: float = 0.75, save_yolo: bool = False) 
         ymax = min(height, int(xyxy[3]))
 
         box = [xmin, ymin, xmax, ymax]
-        rgb_crop, _ = rectify_crop(frame, box)
+        rgb_crop, was_warped = rectify_crop(frame, box)
         if rgb_crop.size == 0:
             continue
 
         boxes.append(box)
         crops.append(rgb_crop)
+        warped_flags.append(was_warped)
 
-    return boxes, crops
+    return boxes, crops, warped_flags
 
 
 def process_video(

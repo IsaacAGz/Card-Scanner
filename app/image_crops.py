@@ -260,7 +260,7 @@ def process_images_crops(
     errors: list[dict] = list(preflight_errors or [])
 
     for source_name, frame in images:
-        boxes, crops = detect_card_boxes(frame, yolo, conf=conf, save_yolo=False)
+        boxes, crops, _ = detect_card_boxes(frame, yolo, conf=conf, save_yolo=False)
         if not crops:
             errors.append(
                 {

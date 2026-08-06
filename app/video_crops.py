@@ -180,7 +180,7 @@ def process_video_crops(
             break
 
         track_manager.expire_stale(processed_samples, expiry_frames=track_expiry_samples)
-        boxes, crops = detect_card_boxes(frame, yolo, conf=conf, save_yolo=False)
+        boxes, crops, _ = detect_card_boxes(frame, yolo, conf=conf, save_yolo=False)
 
         used_tracks: set[int] = set()
         for box, crop in zip(boxes, crops):

@@ -81,34 +81,43 @@ def load_identification_runtime(
         ort_outputs = ort_session.run(None, {"pixel_values": pixel_values})
         return ort_outputs[0][:, 0, :].astype("float32")
 
-    def identify_crops(crop_list, boxes, threshold: float = dist_threshold) -> list[dict]:
+    def identify_crops(crop_list, boxes, threshold: float = dist_threshold, warped_flags: list[bool] | None = None) -> list[dict]:
         if not crop_list:
-            return []
+        return []
 
+        K = 10
         all_vectors = get_embedding(crop_list)
-        all_distances, all_indices = faiss_index.search(all_vectors, k=1)
+        all_distances, all_indices = index.search(all_vectors, k=K)
 
         detections: list[dict] = []
         for i, box in enumerate(boxes):
             dist_val = float(all_distances[i][0])
-            card_idx = all_indices[i][0]
+            card_idx = int(all_indices[i][0])
             card_info = get_card_info(card_idx)
-            is_identified = dist_val <= threshold
+            is_identified = dist_val <= dist_threshold
+
+            candidates = []
+            for j in range(all_indices.shape[1]):
+                fid = int(all_indices[i][j])
+                info = get_card_info(fid)
+                candidate.append({
+                    "rank": j + 1,
+                    "dist": float(all_distances[i][j]),
+                    "name": info[0] if info else None,
+                    "set":info[1] if into else None,
+                })
 
             detection = {
                 "box": box,
                 "identified": is_identified,
                 "dist": dist_val,
-                "name": None,
-                "set": None,
-                "scryfall_id": None,
+                "name": card_info[0] if (is_identified, and card_info) else None,
+                "set": card_info[1] if (is_identified and card_info) else None,
+                "scryfall_id": card_info[2] if (is_identified and card_info) else None,
+                "candidates": candidates,
+                "warped": warped_flags[i] if warped_flags is not None else None,
             }
-
-            if is_identified:
-                detection["name"] = card_info[0] if card_info else "Unknown"
-                detection["set"] = card_info[1] if card_info else "Unknown"
-                detection["scryfall_id"] = card_info[2] if card_info else None
-
+            # print(box, detection["warped"], candidates[:5])
             detections.append(detection)
 
         return detections
