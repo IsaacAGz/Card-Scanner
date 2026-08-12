@@ -101,7 +101,30 @@ class TrackManager:
         existing["last_seen_sec"] = max(existing["last_seen_sec"], timestamp_sec)
 
 
-def detect_card_boxes(frame, yolo, conf: float = 0.75, save_yolo: bool = False) -> tuple[list[list[int]], list[np.ndarray]]:
+def detect_card_boxes(frame, yolo, conf: float = 0.75, save_yolo: bool = False) -> tuple[list[list[int]], list[np.ndarray], list[bool]]:
+    """
+        Does:
+            Sends the frame to yolo model to detect cards, then builds 
+            boxes using yolo coordinate predictions, and rgb_crops and was_warped from rectify_crops().
+
+            was_warped is used to build warped_flags.
+        
+        Args:
+            frame: 3D Numpy Array (BGR)
+            yolo: yolo model loaded with mtg_yolo_best.pt
+            conf: float
+            save_yolo: bool
+
+        Uses:
+            rectify_crop()
+
+
+        Returns:
+            boxes: list[list[int]]
+            crops: list[np.ndarrar]
+            warped_flags: list[bool]
+
+    """
     results = yolo(frame, save=save_yolo, conf=conf)
     boxes: list[list[int]] = []
     crops: list[np.ndarray] = []
@@ -109,7 +132,7 @@ def detect_card_boxes(frame, yolo, conf: float = 0.75, save_yolo: bool = False) 
 
     height, width, _ = frame.shape
     if not results or results[0].boxes is None:
-        return boxes, crops
+        return boxes, crops, warped_flags
 
     for prediction in results[0].boxes:
         xyxy = prediction.xyxy[0].tolist()
@@ -161,7 +184,7 @@ def process_video(
             continue
 
         timestamp_sec = round(frame_idx / fps, 3)
-        boxes, crops = detect_card_boxes(frame, yolo, conf=conf, save_yolo=False)
+        boxes, crops, _ = detect_card_boxes(frame, yolo, conf=conf, save_yolo=False)
         track_manager.expire_stale(processed_count)
 
         pending_boxes: list[list[int]] = []

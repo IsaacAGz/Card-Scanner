@@ -81,9 +81,9 @@ def load_identification_runtime(
         ort_outputs = ort_session.run(None, {"pixel_values": pixel_values})
         return ort_outputs[0][:, 0, :].astype("float32")
 
-    def identify_crops(crop_list, boxes, threshold: float = dist_threshold, warped_flags: list[bool] | None = None) -> list[dict]:
+    def identify_crops(crop_list, boxes, threshold: float = DIST_THRESHOLD, warped_flags: list[bool] | None = None) -> list[dict]:
         if not crop_list:
-        return []
+            return []
 
         K = 10
         all_vectors = get_embedding(crop_list)
@@ -94,24 +94,24 @@ def load_identification_runtime(
             dist_val = float(all_distances[i][0])
             card_idx = int(all_indices[i][0])
             card_info = get_card_info(card_idx)
-            is_identified = dist_val <= dist_threshold
+            is_identified = dist_val <= threshold
 
             candidates = []
             for j in range(all_indices.shape[1]):
                 fid = int(all_indices[i][j])
                 info = get_card_info(fid)
-                candidate.append({
+                candidates.append({
                     "rank": j + 1,
                     "dist": float(all_distances[i][j]),
                     "name": info[0] if info else None,
-                    "set":info[1] if into else None,
+                    "set": info[1] if info else None,
                 })
 
             detection = {
                 "box": box,
                 "identified": is_identified,
                 "dist": dist_val,
-                "name": card_info[0] if (is_identified, and card_info) else None,
+                "name": card_info[0] if (is_identified and card_info) else None,
                 "set": card_info[1] if (is_identified and card_info) else None,
                 "scryfall_id": card_info[2] if (is_identified and card_info) else None,
                 "candidates": candidates,
