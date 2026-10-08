@@ -43,6 +43,66 @@ function getSettings() {
   };
 }
 
+const uploadMeter = document.getElementById("upload-meter");
+const uploadMeterFill = document.getElementById("upload-meter-fill");
+const uploadMeterPercent = document.getElementById("upload-meter-percent");
+
+function showUploadMeter(percent) {
+  uploadMeterFill.style.width = `${percent}%`;
+  uploadMeterPercent.textContent = `${percent}%`;
+  uploadMeter.setAttribute("aria-valuenow", String(percent));
+  uploadMeter.classList.remove("hidden");
+}
+
+function hideUploadMeter() {
+  uploadMeter.classList.add("hidden");
+  uploadMeterFill.style.width = "0%";
+  uploadMeterPercent.textContent = "0%";
+  uploadMeter.setAttribute("aria-valuenow", "0");
+}
+
+function postForm(url, formData) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.responseType = "blob";
+    showUploadMeter(0);
+
+    xhr.upload.addEventListener("progress", (event) => {
+      if (!event.lengthComputable || event.total <= 0) {
+        return;
+      }
+      const percent = Math.min(100, Math.round((event.loaded / event.total) * 100));
+      showUploadMeter(percent);
+    });
+
+    xhr.upload.addEventListener("load", () => {
+      showUploadMeter(100);
+    });
+
+    xhr.addEventListener("load", () => {
+      if (xhr.status === 0) {
+        reject(new TypeError("Network request failed"));
+        return;
+      }
+      resolve(new Response(xhr.response, {
+        status: xhr.status,
+        statusText: xhr.statusText,
+      }));
+    });
+
+    xhr.addEventListener("error", () => {
+      reject(new TypeError("Network request failed"));
+    });
+
+    xhr.addEventListener("abort", () => {
+      reject(new TypeError("Network request failed"));
+    });
+
+    xhr.send(formData);
+  });
+}
+
 function setLoading(active, message = "Processing…") {
   statusText.textContent = message;
   statusEl.classList.toggle("hidden", !active);
@@ -52,6 +112,9 @@ function setLoading(active, message = "Processing…") {
   btnExtractCrops.disabled = active;
   downloadScryfallZipBtn.disabled = active;
   downloadCropsZipBtn.disabled = active;
+  if (!active) {
+    hideUploadMeter();
+  }
 }
 
 function showError(message) {
@@ -606,7 +669,7 @@ formImage.addEventListener("submit", async (event) => {
   setLoading(true, "Scanning image…");
 
   try {
-    const response = await fetch(`/scan?${params}`, { method: "POST", body: formData });
+    const response = await postForm(`/scan?${params}`, formData);
     if (!response.ok) {
       throw new Error(await parseErrorResponse(response));
     }
@@ -644,7 +707,7 @@ formVideo.addEventListener("submit", async (event) => {
   setLoading(true, "Processing video… this may take several minutes on CPU.");
 
   try {
-    const response = await fetch(`/scan/video?${params}`, { method: "POST", body: formData });
+    const response = await postForm(`/scan/video?${params}`, formData);
     if (!response.ok) {
       throw new Error(await parseErrorResponse(response));
     }
@@ -682,10 +745,7 @@ btnExtractImageCrops.addEventListener("click", async () => {
   setLoading(true, built.mode === "zip" ? "Extracting crops from ZIP…" : "Extracting crops from images…");
 
   try {
-    const response = await fetch(`/scan/images/crops-zip?${params}`, {
-      method: "POST",
-      body: built.formData,
-    });
+    const response = await postForm(`/scan/images/crops-zip?${params}`, built.formData);
     if (!response.ok) {
       throw new Error(await parseErrorResponse(response));
     }
@@ -740,7 +800,7 @@ btnExtractCrops.addEventListener("click", async () => {
   setLoading(true, "Uploading video and starting crop job…");
 
   try {
-    const response = await fetch(`/scan/video/crops?${params}`, { method: "POST", body: formData });
+    const response = await postForm(`/scan/video/crops?${params}`, formData);
     if (!response.ok) {
       throw new Error(await parseErrorResponse(response));
     }
@@ -859,4 +919,27 @@ downloadCropsZipBtn.addEventListener("click", async () => {
   } finally {
     setLoading(false);
   }
+});
+
+const reduceMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest(".btn");
+  if (!button || button.disabled || reduceMotionQuery.matches) {
+    return;
+  }
+
+  const rect = button.getBoundingClientRect();
+  const diameter = Math.max(rect.width, rect.height) * 2.2;
+  const ripple = document.createElement("span");
+  ripple.className = "btn-ripple";
+  ripple.style.width = `${diameter}px`;
+  ripple.style.height = `${diameter}px`;
+
+  const fromPointer = event.clientX !== 0 || event.clientY !== 0;
+  ripple.style.left = `${fromPointer ? event.clientX - rect.left : rect.width / 2}px`;
+  ripple.style.top = `${fromPointer ? event.clientY - rect.top : rect.height / 2}px`;
+
+  button.appendChild(ripple);
+  ripple.addEventListener("animationend", () => ripple.remove());
 });
