@@ -212,6 +212,17 @@ Advanced settings: detection confidence, distance threshold, optional crop ident
 
 ## Testing
 
+### Automated tests
+
+`tests/` is a fast pytest suite. It does not load YOLO, DINOv2, or FAISS.
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+`app_testing/` is for trying a real photo or video against a running API, or for running inference directly.
+
 ### Image scan (cURL)
 
 ```bash

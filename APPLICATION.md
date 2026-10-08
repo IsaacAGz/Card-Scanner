@@ -92,9 +92,15 @@ Card Scanner/
 │   ├── test_video_client.py     # Video file → /scan/video
 │   ├── test_video_crops_client.py # Video file → async crop job
 │   ├── test_image_crops_client.py # Images or ZIP → /scan/images/crops-zip
-│   ├── test_image_crops_zip.py    # Phase 3 ZIP extraction unit tests
+│   ├── test_image_crops_zip.py    # Script-style ZIP checks (also covered by pytest)
 │   ├── run_video_crops.py       # Direct CLI crop extraction (no API)
 │   └── run_image_crops.py       # Direct CLI image crop extraction (no API)
+├── tests/                     # Pytest suite (no model load)
+│   ├── test_card_warp.py
+│   ├── test_video_scan.py     # TrackManager / IoU
+│   ├── test_image_crops_zip.py
+│   ├── test_check_artifacts.py
+│   └── test_api.py            # Health and upload validation, models mocked out
 ├── scripts/
 │   ├── check_artifacts.py   # Validate required runtime files
 │   ├── setup.ps1            # Windows one-time setup
@@ -106,6 +112,8 @@ Card Scanner/
 ├── docker-compose.yml       # Docker with artifact volume mounts
 ├── .env.example             # Environment variable template
 ├── requirements.txt
+├── requirements-dev.txt     # pytest + httpx
+├── pytest.ini
 ├── Dockerfile
 ├── Makefile
 ├── README.md                # Setup and API usage
@@ -148,6 +156,7 @@ Interactive docs: `http://localhost:8000/docs`
 - **Setup scripts** — `scripts/setup.ps1`, `scripts/setup.sh`, `scripts/check_artifacts.py`, `make check`
 - **Docker Compose** — `docker compose up` with volume mounts for large artifacts
 - **Docker** standalone image build (when required artifacts are present locally)
+- **Pytest suite** in `tests/` (`pip install -r requirements-dev.txt`, then `pytest`) — no model load
 
 ### Configuration
 
@@ -228,8 +237,10 @@ Planned work is organized into phases (see internal roadmap). Summary:
 
 ### Phase 4 — Tests
 
-- [ ] Pytest unit tests for `sync_new_cards`, `TrackManager`, artifact checker
-- [ ] CI smoke tests (health endpoint, optional mocked inference)
+- [x] Pytest suite in `tests/` (warp geometry, `TrackManager`, ZIP crop guards, artifact path check)
+- [x] API checks for `/health`, bad uploads, and production admin disable, without loading models
+- [ ] Pytest unit tests for `sync_new_cards`
+- [ ] CI smoke tests
 
 ### Future — Large video support (deferred)
 
