@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from transformers import AutoImageProcessor
 
 FAISS_INDEX_PATH = "mtg_cards.index"
-DIST_THRESHOLD = 300
+DIST_THRESHOLD = 1000
 
 
 @dataclass

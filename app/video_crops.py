@@ -137,7 +137,7 @@ def process_video_crops(
     embedding_dedup_threshold: float = 100,
     identify: bool = False,
     identify_crops: Callable[[list, list, float], list[dict]] | None = None,
-    dist_threshold: float = 300,
+    dist_threshold: float = 1000,
     on_progress: Callable[[dict], None] | None = None,
 ) -> dict:
     """Sample a video on a time interval, detect cards, and export deduplicated crops."""

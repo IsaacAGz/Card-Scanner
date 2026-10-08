@@ -66,8 +66,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dist-threshold",
         type=float,
-        default=300.0,
-        help="Identification distance threshold (default: 300).",
+        default=1000.0,
+        help="Identification distance threshold (default: 1000).",
     )
     parser.add_argument(
         "--conf",

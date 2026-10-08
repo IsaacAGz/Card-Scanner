@@ -10,7 +10,7 @@ import numpy as np
 
 from card_warp import rectify_crop
 
-DIST_THRESHOLD = 300
+DIST_THRESHOLD = 1000
 TRACK_IOU_THRESHOLD = 0.5
 TRACK_EXPIRY_FRAMES = 15
 

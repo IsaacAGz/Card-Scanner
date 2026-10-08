@@ -56,7 +56,7 @@ def quad_aspect_score(quad: np.ndarray) -> float:
 
     target = CARD_H / CARD_W
 
-    if ratio < 1.05 or ratio > 1.393:
+    if ratio < 1.05 or ratio > 1.85:
         return 0.0
 
     return float(max(0.0, 1.0 - abs(ratio-target) / target))
@@ -97,7 +97,7 @@ def _edge_maps(gray: np.ndarray) -> list[np.ndarray]:
     maps.append(cv2.Canny(ath, 50, 150))
 
     # CLAHE helps with uneven lighting
-    clahe = cv2.createCLAHE(clipLimit=2.0, tilerGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     eq = clahe.apply(gray)
     maps.append(cv2.Canny(cv2.GaussianBlur(eq, (5, 5), 0), 40, 120))
 
@@ -135,14 +135,22 @@ def find_card_quad(crop_bgr: np.ndarray) -> np.ndarray | None:
 
     for edges in _edge_maps(gray):
         for quad, area in _collect_quads_from_edges(edges, min_area=min_area):
-            aspecr = quad_aspect_score(quad)
+            aspect = quad_aspect_score(quad)
             if aspect <= 0.0:
                 continue
             
-            area_norm = min(1.0, area  crop_size)
-            score = 0.5 * area_norm + 0.5 * aspect
+            area_norm = area / crop_area
+
+            if area_norm < 0.35 or area_norm > 0.90:
+                continue
+
+            area_score = 1.0 - abs(area_norm - 0.65) /0.65
+            area_score = float(max(0.0, area_score))
+
+            score = 0.35 * area_score + 0.65 * aspect
 
             if score >= best_score:
+                best_score = score
                 best_quad = quad
 
     return best_quad
@@ -228,7 +236,7 @@ def _collect_quads_from_edges(
         Args:
             edges: np.ndarray
             min_area: float
-            approx_epss: float
+            approx_eps: float
 
         Uses:
             a lot of cv2
@@ -253,10 +261,13 @@ def _collect_quads_from_edges(
         
         peri = cv2.arcLength(contour, True)
         approx = cv2.approxPolyDP(contour, approx_eps * peri, True)
-        if len(approx) != 4 or not cv2.isContourConvex(approx):
-            continue
-        
-        quad = approx.reshape(4, 2).astype(np.float32)
-        found.append((quad, area))
+        if len(approx) == 4 and cv2.isContourConvex(approx):
+            found.append((approx.reshape(4, 2).astype(np.float32), area))
+
+        rect = cv2.minAreaRect(contour)
+        box = cv2.boxPoints(rect)
+        rect_area = float(rect[1][0] * rect[1][1])
+        if rect_area >= min_area:
+            found.append((box.astype(np.float32), rect_area))
 
     return found

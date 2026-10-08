@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--conf", type=float, default=0.75)
     parser.add_argument("--identify", action="store_true")
-    parser.add_argument("--dist-threshold", type=float, default=300.0)
+    parser.add_argument("--dist-threshold", type=float, default=1000.0)
     parser.add_argument(
         "-o",
         "--output",

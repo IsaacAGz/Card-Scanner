@@ -179,7 +179,7 @@ def process_images_crops_from_uploads(
     conf: float = 0.75,
     identify: bool = False,
     identify_crops: Callable[[list, list, float], list[dict]] | None = None,
-    dist_threshold: float = 300,
+    dist_threshold: float = 1000,
     jpeg_quality: int = 90,
     max_images: int = DEFAULT_MAX_IMAGES,
     max_uncompressed_bytes: int = DEFAULT_MAX_ZIP_UNCOMPRESSED_BYTES,
@@ -246,7 +246,7 @@ def process_images_crops(
     conf: float = 0.75,
     identify: bool = False,
     identify_crops: Callable[[list, list, float], list[dict]] | None = None,
-    dist_threshold: float = 300,
+    dist_threshold: float = 1000,
     jpeg_quality: int = 90,
     preflight_errors: list[dict] | None = None,
 ) -> ImageCropsResult:

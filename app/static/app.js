@@ -26,6 +26,7 @@ let lastCards = [];
 let lastMode = "image";
 let lastCropJobId = null;
 let lastImageCropsBlob = null;
+let lastScanImageFile = null;
 let previewObjectUrl = null;
 let cropPollTimer = null;
 
@@ -78,6 +79,7 @@ function hideResults() {
   previewWrap.classList.add("hidden");
   lastCropJobId = null;
   lastImageCropsBlob = null;
+  lastScanImageFile = null;
   clearPreview();
 }
 
@@ -265,6 +267,7 @@ function renderImageResults(data, imageFile) {
   lastCards = data.cards || [];
   lastCropJobId = null;
   const detections = data.detections || [];
+  lastScanImageFile = detections.length > 0 ? imageFile : null;
 
   resultsTitle.textContent = "Image scan results";
 
@@ -310,7 +313,7 @@ function renderImageResults(data, imageFile) {
   videoMeta.classList.add("hidden");
   resultsEl.classList.remove("hidden");
   downloadScryfallZipBtn.classList.toggle("hidden", lastCards.length === 0);
-  downloadCropsZipBtn.classList.add("hidden");
+  downloadCropsZipBtn.classList.toggle("hidden", detections.length === 0);
 
   if (imageFile && detections.length > 0) {
     drawDetections(imageFile, detections);
@@ -792,6 +795,42 @@ downloadCropsZipBtn.addEventListener("click", async () => {
   if (lastMode === "image-crops" && lastImageCropsBlob) {
     clearError();
     downloadBlob(lastImageCropsBlob, "image_crops.zip");
+    return;
+  }
+
+  if (lastMode === "image" && lastScanImageFile) {
+    clearError();
+    if (lastImageCropsBlob) {
+      downloadBlob(lastImageCropsBlob, "image_crops.zip");
+      return;
+    }
+
+    const { conf } = getSettings();
+    const params = new URLSearchParams({
+      conf: String(conf),
+      identify: "false",
+    });
+    const formData = new FormData();
+    formData.append("files", lastScanImageFile);
+
+    setLoading(true, "Extracting card crops…");
+    try {
+      const response = await fetch(`/scan/images/crops-zip?${params}`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!response.ok) {
+        throw new Error(await parseErrorResponse(response));
+      }
+
+      const blob = await response.blob();
+      lastImageCropsBlob = blob;
+      downloadBlob(blob, "image_crops.zip");
+    } catch (err) {
+      showError(err.message || "Failed to download crops ZIP.");
+    } finally {
+      setLoading(false);
+    }
     return;
   }
 

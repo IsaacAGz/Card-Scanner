@@ -154,7 +154,7 @@ make stop
 ### `POST /scan`
 Scans an uploaded image and returns detected cards with bounding boxes.
 - **Body:** form-data `file` (PNG, JPG, JPEG, WEBP)
-- **Query params:** `conf` (default `0.75`), `dist_threshold` (default `300`)
+- **Query params:** `conf` (default `0.75`), `dist_threshold` (default `1000`)
 
 ### `POST /scan/video`
 Scans a video and returns **unique cards** across sampled frames (track deduplication).
@@ -181,7 +181,7 @@ Extract **camera crops** from uploaded photos or a ZIP of images (synchronous; r
 - **Body (mutually exclusive):**
   - `files` — one or more image files (PNG, JPG, JPEG, WEBP), or
   - `file` — single `.zip` archive containing images
-- **Query params:** `conf` (default `0.75`), `identify` (default `false`), `dist_threshold` (default `300`)
+- **Query params:** `conf` (default `0.75`), `identify` (default `false`), `dist_threshold` (default `1000`)
 - **Response:** `200` + `application/zip` (`image_crops.zip` with `manifest.json`)
 - **Limits:** 50 MB per image, 50 images per request, 500 MB ZIP upload, 1 GB uncompressed ZIP guard (configurable via env)
 
