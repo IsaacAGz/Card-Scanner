@@ -1,5 +1,5 @@
-# MTG Card Scanner
-
+# MTG Card Scanner - https://github.com/IsaacAGz/Card-Scanner
+ 
 A FastAPI web service that detects and identifies Magic: The Gathering cards from images and video. It uses a fine-tuned **YOLO11** model for card detection, **perspective warp** for rectified crops, and **DINOv2 + FAISS** for identification against a Scryfall artwork index.
 
 See [APPLICATION.md](APPLICATION.md) for architecture, current status, and roadmap.
